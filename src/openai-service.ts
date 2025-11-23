@@ -18,7 +18,7 @@ export class OpenAIService {
   }
 
   getModels(): ModelsResponse {
-    // Gọi hàm getAvailableModels từ file gốc
+    // Lấy danh sách model từ file gốc
     const modelIds = this.duckAI.getAvailableModels();
     const now = Math.floor(Date.now() / 1000);
     
@@ -38,11 +38,12 @@ export class OpenAIService {
       throw new Error("messages array is required");
     }
     
-    // Đảm bảo content là string
+    // Validate và ép kiểu content về string
     for (const msg of request.messages) {
       if (msg.role === "tool") continue;
       if (typeof msg.content !== "string" && msg.content !== null) {
         if (Array.isArray(msg.content)) {
+           // Handle multi-modal array (chỉ lấy text)
            msg.content = msg.content
              .filter((c: any) => c.type === 'text')
              .map((c: any) => c.text)
@@ -53,26 +54,68 @@ export class OpenAIService {
       }
     }
 
+    // Default model
     if (!request.model) request.model = "gpt-4o-mini";
+    
     return request as ChatCompletionRequest;
   }
 
-  // Xử lý Non-Streaming (Chờ hết nội dung rồi trả về 1 lần)
-  async createChatCompletion(request: ChatCompletionRequest): Promise<ChatCompletionResponse> {
-    // Xử lý System Prompt cho Tools nếu cần
-    let messages = [...request.messages];
-    if (request.tools && request.tools.length > 0) {
-      const toolPrompt = this.toolService.generateToolSystemPrompt(request.tools, request.tool_choice);
-      const lastUserMsgIndex = messages.findLastIndex(m => m.role === 'user');
-      if (lastUserMsgIndex !== -1) {
-         messages[lastUserMsgIndex].content += `\n\n${toolPrompt}`;
+  /**
+   * CHUẨN HÓA MESSAGES TRƯỚC KHI GỬI CHO DUCKAI
+   * DuckDuckGo hay bị lỗi 500 nếu gặp role="system".
+   * Hàm này sẽ gộp System Prompt vào User Message đầu tiên.
+   */
+  private formatMessagesForDuckAI(
+    messages: ChatCompletionMessage[], 
+    tools?: any[], 
+    toolChoice?: any
+  ): ChatCompletionMessage[] {
+    let finalMessages = [...messages];
+    let systemInstructions = "";
+
+    // 1. Xử lý Tools Instruction (nếu có)
+    if (tools && tools.length > 0) {
+      const toolPrompt = this.toolService.generateToolSystemPrompt(tools, toolChoice);
+      systemInstructions += `${toolPrompt}\n\n`;
+    }
+
+    // 2. Tìm và rút các System Message ra
+    const systemMsgs = finalMessages.filter(m => m.role === "system");
+    if (systemMsgs.length > 0) {
+      systemInstructions += systemMsgs.map(m => m.content).join("\n\n") + "\n\n";
+      // Loại bỏ system message khỏi mảng gốc để tránh gửi role "system"
+      finalMessages = finalMessages.filter(m => m.role !== "system");
+    }
+
+    // 3. Nếu có system instruction, gộp vào User Message đầu tiên hoặc cuối cùng
+    if (systemInstructions.trim().length > 0) {
+      // Tìm tin nhắn user gần nhất (thường là cái cuối cùng hoặc đầu tiên)
+      const lastUserIndex = finalMessages.findLastIndex(m => m.role === "user");
+      
+      if (lastUserIndex !== -1) {
+        // Prepend vào tin nhắn user
+        finalMessages[lastUserIndex].content = 
+          `[System Instructions]:\n${systemInstructions}\n\n[User Message]:\n${finalMessages[lastUserIndex].content}`;
       } else {
-         messages.unshift({ role: "system", content: toolPrompt });
+        // Nếu không có user message nào (hiếm), tạo mới
+        finalMessages.push({ role: "user", content: systemInstructions });
       }
     }
 
-    // Gọi DuckAI gốc
-    const stream = await this.duckAI.chat(request.model, messages);
+    // 4. Đảm bảo role chỉ là "user" hoặc "assistant" (DuckAI đôi khi map assistant -> model nội bộ)
+    // Các role khác có thể gây lỗi.
+    return finalMessages.map(m => ({
+      role: m.role === "assistant" ? "assistant" : "user", // Ép về user nếu là tool/system lọt lưới
+      content: m.content || ""
+    }));
+  }
+
+  // --- Xử lý Non-Streaming ---
+  async createChatCompletion(request: ChatCompletionRequest): Promise<ChatCompletionResponse> {
+    // Chuẩn hóa message để tránh lỗi 500
+    const safeMessages = this.formatMessagesForDuckAI(request.messages, request.tools, request.tool_choice);
+
+    const stream = await this.duckAI.chat(request.model, safeMessages);
     const reader = stream.getReader();
     
     let fullContent = "";
@@ -81,14 +124,13 @@ export class OpenAIService {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        // FILE GỐC TRẢ VỀ STRING, KHÔNG CẦN DECODE
         if (value) fullContent += value; 
       }
     } finally {
       reader.releaseLock();
     }
 
-    const promptTokens = this.estimateTokens(JSON.stringify(messages));
+    const promptTokens = this.estimateTokens(JSON.stringify(safeMessages));
     const completionTokens = this.estimateTokens(fullContent);
 
     return {
@@ -114,32 +156,25 @@ export class OpenAIService {
     };
   }
 
-  // Xử lý Streaming (SSE)
+  // --- Xử lý Streaming (SSE) ---
   async createChatCompletionStream(request: ChatCompletionRequest): Promise<ReadableStream<Uint8Array>> {
-    const encoder = new TextEncoder(); // Encode output ra client thì vẫn cần
+    const encoder = new TextEncoder();
     const id = this.generateId();
     const created = this.getCurrentTimestamp();
     const model = request.model;
 
-    let messages = [...request.messages];
-    if (request.tools && request.tools.length > 0) {
-       const toolPrompt = this.toolService.generateToolSystemPrompt(request.tools, request.tool_choice);
-       const lastUserMsgIndex = messages.findLastIndex(m => m.role === 'user');
-       if (lastUserMsgIndex !== -1) {
-          messages[lastUserMsgIndex].content += `\n\n${toolPrompt}`;
-       }
-    }
+    // Chuẩn hóa message để tránh lỗi 500
+    const safeMessages = this.formatMessagesForDuckAI(request.messages, request.tools, request.tool_choice);
 
-    // Gọi DuckAI gốc
-    const duckStream = await this.duckAI.chat(request.model, messages);
+    const duckStream = await this.duckAI.chat(request.model, safeMessages);
     const duckReader = duckStream.getReader();
 
     let completionTokens = 0;
-    const promptTokens = this.estimateTokens(JSON.stringify(messages));
+    const promptTokens = this.estimateTokens(JSON.stringify(safeMessages));
 
     return new ReadableStream({
       async start(controller) {
-        // Gửi chunk mở đầu
+        // Chunk mở đầu
         const roleChunk: ChatCompletionChunk = {
           id, object: "chat.completion.chunk", created, model,
           choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }]
@@ -151,8 +186,7 @@ export class OpenAIService {
             const { done, value } = await duckReader.read();
             if (done) break;
 
-            // QUAN TRỌNG: File gốc trả về value là String (text), không phải Uint8Array
-            const textChunk = value; 
+            const textChunk = value; // File gốc trả về string
             
             if (!textChunk) continue;
 
@@ -165,14 +199,14 @@ export class OpenAIService {
             controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
           }
 
-          // Gửi chunk kết thúc (STOP)
+          // Chunk kết thúc
           const stopChunk: ChatCompletionChunk = {
             id, object: "chat.completion.chunk", created, model,
             choices: [{ index: 0, delta: {}, finish_reason: "stop" }]
           };
           controller.enqueue(encoder.encode(`data: ${JSON.stringify(stopChunk)}\n\n`));
 
-          // Gửi usage (nếu client hỗ trợ)
+          // Chunk usage
           if (request.stream_options?.include_usage) {
              const usageChunk: ChatCompletionChunk = {
                 id, object: "chat.completion.chunk", created, model,
