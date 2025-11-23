@@ -1,4 +1,5 @@
-// OpenAI API Types
+// types.ts
+
 export interface ChatCompletionMessage {
   role: "system" | "user" | "assistant" | "tool";
   content: string | null;
@@ -10,11 +11,7 @@ export interface ChatCompletionMessage {
 export interface FunctionDefinition {
   name: string;
   description?: string;
-  parameters?: {
-    type: "object";
-    properties: Record<string, any>;
-    required?: string[];
-  };
+  parameters?: Record<string, any>;
 }
 
 export interface ToolDefinition {
@@ -49,12 +46,22 @@ export interface ChatCompletionRequest {
   stop?: string | string[];
   tools?: ToolDefinition[];
   tool_choice?: ToolChoice;
+  stream_options?: {
+    include_usage?: boolean;
+  };
+}
+
+export interface ChatCompletionUsage {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
 }
 
 export interface ChatCompletionChoice {
   index: number;
   message: ChatCompletionMessage;
   finish_reason: "stop" | "length" | "content_filter" | "tool_calls" | null;
+  logprobs?: any;
 }
 
 export interface ChatCompletionResponse {
@@ -62,30 +69,35 @@ export interface ChatCompletionResponse {
   object: "chat.completion";
   created: number;
   model: string;
+  system_fingerprint?: string;
   choices: ChatCompletionChoice[];
-  usage: {
-    prompt_tokens: number;
-    completion_tokens: number;
-    total_tokens: number;
-  };
+  usage: ChatCompletionUsage;
 }
 
-export interface ChatCompletionStreamChoice {
+export interface ChatCompletionChunkChoice {
   index: number;
   delta: {
-    role?: "assistant";
-    content?: string;
+    role?: "system" | "user" | "assistant" | "tool";
+    content?: string | null;
     tool_calls?: ToolCall[];
   };
   finish_reason: "stop" | "length" | "content_filter" | "tool_calls" | null;
+  logprobs?: any;
 }
 
-export interface ChatCompletionStreamResponse {
+export interface ChatCompletionChunk {
   id: string;
   object: "chat.completion.chunk";
   created: number;
   model: string;
-  choices: ChatCompletionStreamChoice[];
+  system_fingerprint?: string;
+  choices: ChatCompletionChunkChoice[];
+  usage?: ChatCompletionUsage; // OpenAI now supports usage in the last chunk
+}
+
+export interface ModelsResponse {
+  object: "list";
+  data: Model[];
 }
 
 export interface Model {
@@ -95,18 +107,19 @@ export interface Model {
   owned_by: string;
 }
 
-export interface ModelsResponse {
-  object: "list";
-  data: Model[];
-}
-
-// Duck.ai specific types
-export interface VQDResponse {
-  vqd: string;
-  hash: string;
-}
-
 export interface DuckAIRequest {
   model: string;
   messages: ChatCompletionMessage[];
+}
+
+// Error Response Types
+export interface OpenAIError {
+  message: string;
+  type: string;
+  param: string | null;
+  code: string | null;
+}
+
+export interface OpenAIErrorResponse {
+  error: OpenAIError;
 }
