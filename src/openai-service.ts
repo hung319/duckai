@@ -1,4 +1,3 @@
-// openai-service.ts
 import { DuckAI } from "./duckai";
 import { ToolService } from "./tool-service";
 import type {
@@ -7,8 +6,6 @@ import type {
   ChatCompletionChunk,
   ChatCompletionMessage,
   ModelsResponse,
-  Model,
-  ChatCompletionUsage,
 } from "./types";
 
 export class OpenAIService {
@@ -21,6 +18,7 @@ export class OpenAIService {
   }
 
   getModels(): ModelsResponse {
+    // Gọi hàm getAvailableModels từ file gốc
     const modelIds = this.duckAI.getAvailableModels();
     const now = Math.floor(Date.now() / 1000);
     
@@ -40,49 +38,42 @@ export class OpenAIService {
       throw new Error("messages array is required");
     }
     
-    // Ensure content is string (handle array content in newer GPT-4 vision api if needed, strictly string for now)
+    // Đảm bảo content là string
     for (const msg of request.messages) {
-      if (msg.role === "tool") continue; // Tool messages might have complex content
+      if (msg.role === "tool") continue;
       if (typeof msg.content !== "string" && msg.content !== null) {
-        // Simplified validation: Convert non-string to string if possible or throw
         if (Array.isArray(msg.content)) {
-           // Basic handling for multi-modal content array (just extract text)
            msg.content = msg.content
              .filter((c: any) => c.type === 'text')
              .map((c: any) => c.text)
              .join('\n');
+        } else {
+            msg.content = String(msg.content || "");
         }
       }
     }
 
-    // Default model if not provided
     if (!request.model) request.model = "gpt-4o-mini";
-
     return request as ChatCompletionRequest;
   }
 
+  // Xử lý Non-Streaming (Chờ hết nội dung rồi trả về 1 lần)
   async createChatCompletion(request: ChatCompletionRequest): Promise<ChatCompletionResponse> {
-    // Handling Tools:
-    // If tools are present, we modify the last user message to include instructions
-    // This is a naive implementation. For robust tool use, we'd need a multi-turn loop.
+    // Xử lý System Prompt cho Tools nếu cần
     let messages = [...request.messages];
     if (request.tools && request.tools.length > 0) {
       const toolPrompt = this.toolService.generateToolSystemPrompt(request.tools, request.tool_choice);
-      // Inject into the last user message or system message
       const lastUserMsgIndex = messages.findLastIndex(m => m.role === 'user');
       if (lastUserMsgIndex !== -1) {
          messages[lastUserMsgIndex].content += `\n\n${toolPrompt}`;
       } else {
-         // Fallback: add as system message
          messages.unshift({ role: "system", content: toolPrompt });
       }
     }
 
-    // Call DuckAI
-    // Note: DuckAI returns a stream normally. We need to collect it for non-streaming response.
+    // Gọi DuckAI gốc
     const stream = await this.duckAI.chat(request.model, messages);
     const reader = stream.getReader();
-    const decoder = new TextDecoder();
     
     let fullContent = "";
     
@@ -90,18 +81,13 @@ export class OpenAIService {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        fullContent += decoder.decode(value, { stream: true });
+        // FILE GỐC TRẢ VỀ STRING, KHÔNG CẦN DECODE
+        if (value) fullContent += value; 
       }
     } finally {
       reader.releaseLock();
     }
 
-    // Parse for Tool Calls (naive JSON check)
-    // If content looks like JSON tool call, parse it.
-    // NOTE: In a real "proxy", we should return the tool_call object, not execute it.
-    // Client executes -> sends result -> model responds.
-    
-    // Construct Usage
     const promptTokens = this.estimateTokens(JSON.stringify(messages));
     const completionTokens = this.estimateTokens(fullContent);
 
@@ -110,16 +96,14 @@ export class OpenAIService {
       object: "chat.completion",
       created: this.getCurrentTimestamp(),
       model: request.model,
-      system_fingerprint: "fp_duckai_wrapper",
       choices: [
         {
           index: 0,
           message: {
             role: "assistant",
-            content: fullContent, // TODO: Extract tool calls if JSON
-            tool_calls: undefined, // Add logic here if parsing JSON
+            content: fullContent,
           },
-          finish_reason: "stop", // or "tool_calls"
+          finish_reason: "stop",
         },
       ],
       usage: {
@@ -130,13 +114,13 @@ export class OpenAIService {
     };
   }
 
+  // Xử lý Streaming (SSE)
   async createChatCompletionStream(request: ChatCompletionRequest): Promise<ReadableStream<Uint8Array>> {
-    const encoder = new TextEncoder();
+    const encoder = new TextEncoder(); // Encode output ra client thì vẫn cần
     const id = this.generateId();
     const created = this.getCurrentTimestamp();
     const model = request.model;
 
-    // Inject tools instructions similar to non-streaming
     let messages = [...request.messages];
     if (request.tools && request.tools.length > 0) {
        const toolPrompt = this.toolService.generateToolSystemPrompt(request.tools, request.tool_choice);
@@ -146,18 +130,16 @@ export class OpenAIService {
        }
     }
 
-    // Get upstream stream
+    // Gọi DuckAI gốc
     const duckStream = await this.duckAI.chat(request.model, messages);
     const duckReader = duckStream.getReader();
-    const decoder = new TextDecoder();
 
-    // Token estimation
     let completionTokens = 0;
     const promptTokens = this.estimateTokens(JSON.stringify(messages));
 
     return new ReadableStream({
       async start(controller) {
-        // Send initial chunk with role
+        // Gửi chunk mở đầu
         const roleChunk: ChatCompletionChunk = {
           id, object: "chat.completion.chunk", created, model,
           choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }]
@@ -169,10 +151,12 @@ export class OpenAIService {
             const { done, value } = await duckReader.read();
             if (done) break;
 
-            const textChunk = decoder.decode(value, { stream: true });
+            // QUAN TRỌNG: File gốc trả về value là String (text), không phải Uint8Array
+            const textChunk = value; 
+            
             if (!textChunk) continue;
 
-            completionTokens++; // Rough count
+            completionTokens++;
 
             const chunk: ChatCompletionChunk = {
               id, object: "chat.completion.chunk", created, model,
@@ -181,14 +165,14 @@ export class OpenAIService {
             controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
           }
 
-          // Send final stop chunk
+          // Gửi chunk kết thúc (STOP)
           const stopChunk: ChatCompletionChunk = {
             id, object: "chat.completion.chunk", created, model,
             choices: [{ index: 0, delta: {}, finish_reason: "stop" }]
           };
           controller.enqueue(encoder.encode(`data: ${JSON.stringify(stopChunk)}\n\n`));
 
-          // Send usage chunk (if requested or by default for some clients)
+          // Gửi usage (nếu client hỗ trợ)
           if (request.stream_options?.include_usage) {
              const usageChunk: ChatCompletionChunk = {
                 id, object: "chat.completion.chunk", created, model,
@@ -202,10 +186,9 @@ export class OpenAIService {
              controller.enqueue(encoder.encode(`data: ${JSON.stringify(usageChunk)}\n\n`));
           }
 
-          // Send [DONE]
           controller.enqueue(encoder.encode("data: [DONE]\n\n"));
         } catch (e) {
-          console.error("Streaming error", e);
+          console.error("Streaming error inside service:", e);
           controller.error(e);
         } finally {
           controller.close();
