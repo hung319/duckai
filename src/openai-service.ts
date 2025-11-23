@@ -75,9 +75,16 @@ export class OpenAIService {
     // Use the model from request, fallback to default
     const model = request.model || "mistralai/Mistral-Small-24B-Instruct-2501";
 
+    // [FIX] DuckAI (DuckDuckGo API) thường trả về 400 nếu gặp role 'system'.
+    // Ta cần map 'system' -> 'user' để đảm bảo request hợp lệ.
+    const sanitizedMessages = request.messages.map((msg) => ({
+      ...msg,
+      role: msg.role === "system" ? "user" : msg.role,
+    }));
+
     return {
       model,
-      messages: request.messages,
+      messages: sanitizedMessages,
     };
   }
 
