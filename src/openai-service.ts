@@ -576,36 +576,63 @@ Please follow these instructions when responding to the following user message.`
       throw new Error("messages array cannot be empty");
     }
 
-    for (const message of request.messages) {
+    // [FIX] Sanitize and validate messages
+    // Thay vì throw lỗi, ta sẽ cố gắng convert data về dạng chuẩn (String hoặc Null)
+    const sanitizedMessages = request.messages.map((message: any, index: number) => {
+      // 1. Validate Role
       if (
         !message.role ||
         !["system", "user", "assistant", "tool"].includes(message.role)
       ) {
         throw new Error(
-          "Each message must have a valid role (system, user, assistant, or tool)"
+          `Message at index ${index} has invalid role: ${message.role}`
         );
       }
 
-      // Tool messages have different validation rules
+      let content = message.content;
+
+      // 2. Handle Array content (Ví dụ: GPT-4 Vision request gửi content dạng mảng)
+      if (Array.isArray(content)) {
+        // Lấy tất cả phần text ghép lại
+        content = content
+          .filter((c: any) => c.type === 'text' && c.text)
+          .map((c: any) => c.text)
+          .join("\n");
+      }
+
+      // 3. Handle undefined content -> convert to null
+      if (content === undefined) {
+        content = null;
+      }
+
+      // 4. Validate Tool Messages
       if (message.role === "tool") {
         if (!message.tool_call_id) {
-          throw new Error("Tool messages must have a tool_call_id");
+          throw new Error(`Tool message at index ${index} must have a tool_call_id`);
         }
-        if (typeof message.content !== "string") {
-          throw new Error("Tool messages must have content as a string");
+        // Tool message bắt buộc phải có nội dung string (kết quả trả về từ function)
+        if (content === null) {
+             content = "Success"; // Fallback an toàn
+        } else if (typeof content !== "string") {
+             content = JSON.stringify(content); // Force string nếu là object
         }
       } else {
-        // For non-tool messages, content can be null if there are tool_calls
-        if (
-          message.content === undefined ||
-          (message.content !== null && typeof message.content !== "string")
-        ) {
-          throw new Error("Each message must have content as a string or null");
+        // 5. Validate Non-tool messages (System, User, Assistant)
+        // Content phải là string hoặc null (nếu có tool_calls)
+        if (content !== null && typeof content !== "string") {
+          // Cố gắng convert to string thay vì throw error
+          content = String(content); 
         }
       }
-    }
 
-    // Validate tools if provided
+      // Trả về message đã được làm sạch
+      return {
+        ...message,
+        content,
+      };
+    });
+
+    // Validate tools if provided (giữ nguyên logic cũ)
     if (request.tools) {
       const validation = this.toolService.validateTools(request.tools);
       if (!validation.valid) {
@@ -615,7 +642,7 @@ Please follow these instructions when responding to the following user message.`
 
     return {
       model: request.model || "mistralai/Mistral-Small-24B-Instruct-2501",
-      messages: request.messages,
+      messages: sanitizedMessages, // [IMPORTANT] Sử dụng mảng đã sanitize
       temperature: request.temperature,
       max_tokens: request.max_tokens,
       stream: request.stream || false,
