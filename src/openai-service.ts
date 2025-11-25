@@ -568,6 +568,29 @@ Please follow these instructions when responding to the following user message.`
   }
 
   validateRequest(request: any): ChatCompletionRequest {
+    // [FIX 1] Xử lý trường hợp request bị truyền vào dưới dạng JSON string
+    if (typeof request === "string") {
+      try {
+        request = JSON.parse(request);
+      } catch (error) {
+        throw new Error("Request body is invalid JSON string");
+      }
+    }
+
+    // [FIX 2] Kiểm tra nếu request null hoặc không phải object
+    if (!request || typeof request !== "object") {
+      throw new Error("Request body is empty or not an object");
+    }
+
+    // [DEBUG] Log ra keys nhận được để kiểm tra (giúp bạn thấy server đang gửi cái gì)
+    if (!request.messages) {
+      console.warn(
+        "[ValidationError] Request missing 'messages'. Received payload:", 
+        JSON.stringify(request, null, 2)
+      );
+    }
+
+    // Validate messages array (Logic cũ của bạn)
     if (!request.messages || !Array.isArray(request.messages)) {
       throw new Error("messages field is required and must be an array");
     }
@@ -642,7 +665,7 @@ Please follow these instructions when responding to the following user message.`
 
     return {
       model: request.model || "mistralai/Mistral-Small-24B-Instruct-2501",
-      messages: sanitizedMessages, // [IMPORTANT] Sử dụng mảng đã sanitize
+      messages: sanitizedMessages, 
       temperature: request.temperature,
       max_tokens: request.max_tokens,
       stream: request.stream || false,
