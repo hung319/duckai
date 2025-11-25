@@ -1,7 +1,9 @@
 import { OpenAIService } from "./openai-service";
-// import { OpenAIErrorResponse } from "./types"; // (Nếu bạn cần type này)
+import { OpenAIErrorResponse } from "./types";
 
 const openAIService = new OpenAIService();
+
+// Lấy Key từ environment
 const SERVER_API_KEY = process.env.SERVER_API_KEY;
 
 const server = Bun.serve({
@@ -9,7 +11,7 @@ const server = Bun.serve({
   async fetch(req) {
     const url = new URL(req.url);
 
-    // --- CORS CONFIGURATION ---
+    // CORS
     const corsHeaders = {
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
@@ -18,7 +20,7 @@ const server = Bun.serve({
 
     if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
-    // --- HEALTH CHECK ---
+    // Health Check
     if (url.pathname === "/health" && req.method === "GET") {
       return new Response(JSON.stringify({ status: "ok" }), {
         headers: { "Content-Type": "application/json", ...corsHeaders },
@@ -33,6 +35,7 @@ const server = Bun.serve({
           error: {
             message: "Incorrect API key.",
             type: "invalid_request_error",
+            param: null,
             code: "invalid_api_key",
           }
         }), {
@@ -42,9 +45,7 @@ const server = Bun.serve({
       }
     }
 
-    // --- MAIN LOGIC ---
     try {
-      // 1. List Models
       if (url.pathname === "/v1/models" && req.method === "GET") {
         const models = openAIService.getModels();
         return new Response(JSON.stringify(models), {
@@ -52,19 +53,8 @@ const server = Bun.serve({
         });
       }
 
-      // 2. Chat Completions
       if (url.pathname === "/v1/chat/completions" && req.method === "POST") {
-        let body;
-        try {
-          body = await req.json();
-        } catch (e) {
-          // Bắt lỗi cú pháp JSON ngay tại đây (ví dụ: thiếu dấu ngoặc })
-          return new Response(JSON.stringify({ error: { message: "Invalid JSON format" } }), {
-             status: 400, headers: { "Content-Type": "application/json", ...corsHeaders } 
-          });
-        }
-
-        // Validate request (Có thể ném lỗi nếu thiếu field)
+        const body = await req.json();
         const validatedRequest = openAIService.validateRequest(body);
 
         if (validatedRequest.stream) {
@@ -85,30 +75,11 @@ const server = Bun.serve({
         }
       }
 
-      // 404 Not Found
-      return new Response(JSON.stringify({ error: { message: "Not Found" } }), { 
-        status: 404, headers: { "Content-Type": "application/json", ...corsHeaders } 
-      });
-
+      return new Response(JSON.stringify({ error: { message: "Not Found" } }), { status: 404, headers: corsHeaders });
     } catch (error: any) {
-      console.error("[ServerError]", error);
-      
-      const errorMessage = error.message || "Internal Server Error";
-      
-      // [FIX] Phân loại lỗi để trả về status code đúng
-      // Nếu lỗi chứa từ khóa validation (từ openai-service), trả về 400
-      const isValidationError = 
-        errorMessage.includes("required") || 
-        errorMessage.includes("invalid") || 
-        errorMessage.includes("must be");
-
-      return new Response(JSON.stringify({ 
-        error: { 
-          message: errorMessage,
-          type: isValidationError ? "invalid_request_error" : "internal_error"
-        } 
-      }), {
-        status: isValidationError ? 400 : 500, // 400 cho user sai, 500 cho server lỗi
+      console.error(error);
+      return new Response(JSON.stringify({ error: { message: error.message || "Internal Error" } }), {
+        status: 500,
         headers: { "Content-Type": "application/json", ...corsHeaders },
       });
     }
